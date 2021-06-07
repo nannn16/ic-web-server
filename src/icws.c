@@ -7,6 +7,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <getopt.h>
+#include <time.h>
 #include "parse.h"
 #include "pcsa_net.h"
 
@@ -40,46 +41,65 @@ int getOption(int argc, char **argv) {
     return 1;
 }
 
-int respond_header(int connFd, char *path) {
+char* getStatusCode(int code) {
+    char* msg = NULL;
+    /* respond status code */
+    if(code==200) msg = "200 OK";
+    else if(code==400) msg = "400 Bad Request";
+    else if(code==404) msg = "404 File Not Found";
+    else if(code==501) msg = "501 Method Unimplemented";
+    else if(code==505) msg = "505 HTTP Version Not Supported";
+    return msg;
+} 
 
+char* getMIMEType(char *ext) {
+    char* type = "";
+    /* MIME types */
+    if(strcmp(ext, "html")==0) type = "text/html";
+    else if(strcmp(ext, "css")==0) type = "text/css";
+    else if(strcmp(ext, "txt")==0) type = "text/plain";
+    else if(strcmp(ext, "jpg")==0) type = "image/jpg";
+    else if(strcmp(ext, "jpeg")==0) type = "image/jpeg";
+    else if(strcmp(ext, "gif")==0) type = "image/gif";
+    else if(strcmp(ext, "js")==0) type = "application/javascript";
+    return type;
+}
+
+int respond_header(int connFd, char *path, int code) {
     char buf[MAXBUF];
     struct stat s;
-    char* type = "";
-    char* ext = strrchr(path, '.');
-    ext = ext+1;
+    char* type = ""; /* MIME types */
+    time_t t = time(NULL); /* time */
+    off_t size = 0; /* file size */
+    char *mtime = ""; /* time of last modification */
 
     if(stat(path, &s)>=0) {
-        if(s.st_size==0) {
-            char * msg = "411 Length Required\n";
-            write_all(connFd, msg , strlen(msg) );
-            return 0;
-        } 
-
-        if(strcmp(ext, "html")==0) type = "text/html";
-        else if(strcmp(ext, "jpg")==0) type = "image/jpg";
-        else if(strcmp(ext, "jpeg")==0) type = "image/jpeg";
-
-        sprintf(buf,
-            "HTTP/1.1 200 OK\r\n"
-            "Server: Tiny\r\n"
-            "Connection: close\r\n"
-            "Content-length: %lu\r\n"
-            "Content-type: %s\r\n\r\n", s.st_size, type);
-        write_all(connFd, buf, strlen(buf));
+        char* ext = strrchr(path, '.');
+        ext = ext+1;
+        type = getMIMEType(ext);
+        size = s.st_size;
+        mtime = ctime(&s.st_mtime);
     }
     else {
-        char * msg = "404 Not Found\n";
-        write_all(connFd, msg , strlen(msg) );
-        return 0;
+        if(code != 400) code = 404;
     }
+
+    char *msg = getStatusCode(code);
+    sprintf(buf,
+        "HTTP/1.1 %s\r\n"
+        "Date: %s"
+        "Server: Tiny\r\n"
+        "Connection: close\r\n"
+        "Content-length: %ld\r\n"
+        "Content-type: %s\r\n"
+        "Last-Modified: %s\r\n", msg, ctime(&t), size, type, mtime);
+    write_all(connFd, buf, strlen(buf));
     return 1;
 }
 
-void respond_server(int connFd, char *path) {
+void respond_server(int connFd, char *path, int code) {
 
-    if(!respond_header(connFd, path)) {
-        return ;
-    }
+    respond_header(connFd, path, code);
     char buf[MAXBUF];
     int inputFd = open(path, O_RDONLY);
     if(inputFd <= 0) {
@@ -96,27 +116,29 @@ void respond_server(int connFd, char *path) {
 
 void serve_http(int connFd, char *rootFolder) {
     char buf[MAXBUF];
-    int readRet;
+    ssize_t readRet;
     /* Drain the remaining of the request */
-    if ((readRet = read(connFd, buf, MAXBUF)) < MAXBUF) {
+    if ((readRet = read(connFd, buf, MAXBUF)) > 0) {
         // if (strcmp(buf, "\r\n") == 0) break;
         Request *request = parse(buf,readRet,connFd);
-
         if(request!=NULL) {
             char path[MAXBUF];
             strcpy(path, rootFolder);
             strcat(path, request->http_uri);
-
-            if (strcasecmp(request->http_method, "GET") == 0) {
+            /* 505 HTTP Version Not Supported */
+            if(strcmp(request->http_version, "HTTP/1.1")) {
+                respond_header(connFd, path, 505);
+            }
+            else if (strcasecmp(request->http_method, "GET") == 0) {
                 printf("LOG: Sending %s\n", path);
-                respond_server(connFd, path);
+                respond_server(connFd, path, 200);
             }
             else if (strcasecmp(request->http_method, "HEAD") == 0) {
-                respond_header(connFd, path);
+                respond_header(connFd, path, 200);
             }
             else {
-                char * msg = "501 Method Unimplemented\n";
-                write_all(connFd, msg , strlen(msg));
+                char *msg = "501 Method Unimplemented\r\n";
+                write_all(connFd, msg, strlen(msg));
                 return ;
             }     
             free(request->headers);
@@ -124,17 +146,14 @@ void serve_http(int connFd, char *rootFolder) {
         }
         /* Malformed Requests */
         else {
-            char * msg = "404 Not Found\n";
-            write_all(connFd, msg , strlen(msg));
-            return ;
+            respond_header(connFd, NULL, 400);
         }
-    }   
+    }
 }
 
 int main(int argc, char **argv){
 
     getOption(argc, argv);
-
     if(strlen(port) == 0 || strlen(root) == 0) {
         printf("Required option both --port and --root\n");
         exit(0);
@@ -162,6 +181,5 @@ int main(int argc, char **argv){
         serve_http(connFd, root);
         close(connFd);
     }
-
     return 0;
 }
