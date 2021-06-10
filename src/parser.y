@@ -211,8 +211,6 @@ request_header: token ows t_colon ows text ows t_crlf {
 	strcpy(parsing_request->headers[parsing_request->header_count].header_value, $5);
 	parsing_request->header_count++;
 };
-| request_header request_headers;
-| request_headers;
 
 
 /*
@@ -225,7 +223,7 @@ request_header: token ows t_colon ows text ows t_crlf {
 request_headers: request_headers request_header {}
 | {};    /* Request headers can be empty */
 
-request: request_line request_header t_crlf{
+request: request_line request_headers t_crlf{
 	YPRINTF("parsing_request: Matched Success.\n");
 	return SUCCESS;
 };

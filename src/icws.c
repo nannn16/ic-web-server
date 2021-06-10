@@ -68,31 +68,35 @@ char* getMIMEType(char *ext) {
 int respond_header(int connFd, char *path, int code) {
     char buf[MAXBUF];
     struct stat s;
-    char* type = ""; /* MIME types */
     time_t t = time(NULL); /* time */
-    off_t size = 0; /* file size */
-    char *mtime = ""; /* time of last modification */
+    struct tm *tm = localtime(&t);
+    char time[64];
+    strftime(time, sizeof(time), "%c", tm);
+    /* file size, MIME types, time of last modification */
+    off_t size = 0; char* type = ""; char mtime[64] = "";
 
-    if(stat(path, &s)>=0) {
-        char* ext = strrchr(path, '.');
-        ext = ext+1;
-        type = getMIMEType(ext);
-        size = s.st_size;
-        mtime = ctime(&s.st_mtime);
-    }
-    else {
-        if(code != 400) code = 404;
+    if(code != 400 && code != 501) {
+        if(stat(path, &s)>=0) {
+            char* ext = strrchr(path, '.') + 1;
+            type = getMIMEType(ext);
+            size = s.st_size;
+            tm = localtime(&s.st_mtime);
+            strftime(mtime, sizeof(mtime), "%c", tm);
+        }
+        else {
+            code = 404;
+        }
     }
 
     char *msg = getStatusCode(code);
     sprintf(buf,
         "HTTP/1.1 %s\r\n"
-        "Date: %s"
+        "Date: %s\r\n"
         "Server: Tiny\r\n"
         "Connection: close\r\n"
         "Content-length: %ld\r\n"
         "Content-type: %s\r\n"
-        "Last-Modified: %s\r\n", msg, ctime(&t), size, type, mtime);
+        "Last-Modified: %s\r\n\r\n", msg, time, size, type, mtime);
     write_all(connFd, buf, strlen(buf));
     return 1;
 }
@@ -114,39 +118,91 @@ void respond_server(int connFd, char *path, int code) {
     close(inputFd);
 }
 
+/* check if it is CRLFCRLF state yet */
+int check_state(char *buffer, int size) {
+    enum {
+		STATE_START = 0, STATE_CR, STATE_CRLF, STATE_CRLFCR, STATE_CRLFCRLF
+	};
+
+	int i = 0, state;
+	char ch;
+
+	state = STATE_START;
+	while (state != STATE_CRLFCRLF) {
+		char expected = 0;
+
+		if (i == size)
+			break;
+
+		ch = buffer[i++];
+
+		switch (state) {
+		case STATE_START:
+		case STATE_CRLF:
+			expected = '\r';
+			break;
+		case STATE_CR:
+		case STATE_CRLFCR:
+			expected = '\n';
+			break;
+		default:
+			state = STATE_START;
+			continue;
+		}
+
+		if (ch == expected)
+			state++;
+		else
+			state = STATE_START;
+	}
+
+    if (state == STATE_CRLFCRLF) {
+		return 1;
+	}
+	return 0;
+}
+
 void serve_http(int connFd, char *rootFolder) {
     char buf[MAXBUF];
-    ssize_t readRet;
+    char buffer[MAXBUF];
+    ssize_t readRet = 0;
+    ssize_t numRead;
     /* Drain the remaining of the request */
-    if ((readRet = read(connFd, buf, MAXBUF)) > 0) {
-        // if (strcmp(buf, "\r\n") == 0) break;
-        Request *request = parse(buf,readRet,connFd);
-        if(request!=NULL) {
-            char path[MAXBUF];
-            strcpy(path, rootFolder);
-            strcat(path, request->http_uri);
-            /* 505 HTTP Version Not Supported */
-            if(strcmp(request->http_version, "HTTP/1.1")) {
-                respond_header(connFd, path, 505);
-            }
-            else if (strcasecmp(request->http_method, "GET") == 0) {
-                printf("LOG: Sending %s\n", path);
-                respond_server(connFd, path, 200);
-            }
-            else if (strcasecmp(request->http_method, "HEAD") == 0) {
-                respond_header(connFd, path, 200);
-            }
-            else {
-                char *msg = "501 Method Unimplemented\r\n";
-                write_all(connFd, msg, strlen(msg));
-                return ;
-            }     
-            free(request->headers);
-            free(request);
-        }
-        /* Malformed Requests */
-        else {
+    while ((numRead = read(connFd, buffer, MAXBUF))>0) {
+        readRet += numRead;
+        if(readRet > MAXBUF) {
             respond_header(connFd, NULL, 400);
+            return ;
+        }
+        /* if request header is not > 8k bytes */
+        strcpy(buf + (readRet-numRead), buffer);
+        if (check_state(buf, readRet)) {
+            Request *request = parse(buf,readRet,connFd);
+            if(request!=NULL) {
+                char path[MAXBUF];
+                strcpy(path, rootFolder);
+                strcat(path, request->http_uri);
+                /* 505 HTTP Version Not Supported */
+                if(strcasecmp(request->http_version, "HTTP/1.1")) {
+                    respond_header(connFd, path, 505);
+                }
+                else if (strcasecmp(request->http_method, "GET") == 0) {
+                    respond_server(connFd, path, 200);
+                }
+                else if (strcasecmp(request->http_method, "HEAD") == 0) {
+                    respond_header(connFd, path, 200);
+                }
+                else {
+                    respond_header(connFd, NULL, 501);
+                }     
+                free(request->headers);
+                free(request);
+            }
+            /* Malformed Requests */
+            else {
+                respond_header(connFd, NULL, 400);
+            }
+            return ;
         }
     }
 }
