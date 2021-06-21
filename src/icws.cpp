@@ -11,10 +11,10 @@
 #include <time.h>
 #include <poll.h>
 #include <pthread.h>
-#include "simple_work_queue.hpp"
 extern "C" {
 #include "pcsa_net.h"
 #include "parse.h"
+#include "queue.h"
 }
 
 // https://github.com/mbrossard/threadpool/blob/master/src/threadpool.c
@@ -25,7 +25,15 @@ char port[MAXBUF];
 char root[MAXBUF];
 int numThreads;
 int timeout;
+pthread_mutex_t mutex;
 typedef struct sockaddr SA;
+
+struct threadpool_t {
+    Queue *jobs;
+    pthread_mutex_t jobs_mutex;
+    pthread_cond_t jobs_cond;
+    pthread_t *threads;
+};
 
 // struct threadpool_t *threadpool;
 
@@ -168,7 +176,7 @@ void respond_server(int connFd, char *path, int code)
     close(inputFd);
 }
 
-void serve_http(int connFd, char *rootFolder, threadpool_t *threadpool)
+void serve_http(int connFd, char *rootFolder)
 {
     char buf[MAXBUF];
     memset(buf, 0, sizeof(buf));
@@ -190,10 +198,10 @@ void serve_http(int connFd, char *rootFolder, threadpool_t *threadpool)
         if (strstr(buf, "\r\n\r\n") != NULL) break;
     }
 
-    pthread_mutex_lock(&threadpool->jobs_mutex);
+    pthread_mutex_lock(&mutex);
+    printf("parse...\n");
     Request *request = parse(buf, readRet, connFd);
-    pthread_mutex_unlock(&threadpool->jobs_mutex);
-    printf("nan\n");
+    pthread_mutex_unlock(&mutex);
 
     if (request != NULL)
     {
@@ -233,21 +241,40 @@ void serve_http(int connFd, char *rootFolder, threadpool_t *threadpool)
 void* do_work(void *pool) {
 
     threadpool_t *tpool = (threadpool_t *)pool;
-
     for (;;) {
-        survival_bag context;
-        if (tpool->remove_job(&context)) {
+        // if (tpool->remove_job(&context)) {
 
-            // if (connFd < 0) break; // Terminate with a number < 0
-            printf("%d\n", context.connFd);
-            serve_http(context.connFd, context.rootFolder, tpool);
-            close(context.connFd);
+        //     // if (connFd < 0) break; // Terminate with a number < 0
+        //     printf("%d\n", context.connFd);
+        //     serve_http(context.connFd, context.rootFolder);
+        //     close(context.connFd);
+        // }
+        pthread_mutex_lock(&(tpool->jobs_mutex));
+        while(isEmpty(tpool->jobs)) {
+            pthread_cond_wait(&(tpool->jobs_cond), &(tpool->jobs_mutex));
         }
+
+        int connFd = pop(tpool->jobs);
+        pthread_mutex_unlock(&(tpool->jobs_mutex));
+        printf("%d\n", connFd);
+        serve_http(connFd, root);
+        close(connFd);
+
         /* Option 5: Go to sleep until it's been notified of changes in the
          * work_queue. Use semaphores or conditional variables
          */
     }
+
+    pthread_mutex_unlock(&(tpool->jobs_mutex));
+    pthread_exit(NULL);
     return NULL;
+}
+
+void threadpool_add(threadpool_t *pool, int connFd) {
+    pthread_mutex_lock(&(pool->jobs_mutex));
+    push(&(pool->jobs), connFd);
+    pthread_cond_signal(&(pool->jobs_cond));
+    pthread_mutex_unlock(&(pool->jobs_mutex));
 }
 
 threadpool_t *threadpool_create(int numThreads) {
@@ -257,12 +284,31 @@ threadpool_t *threadpool_create(int numThreads) {
     threadpool->threads = (pthread_t *)malloc(sizeof(pthread_t) * numThreads);
 
     pthread_mutex_init(&(threadpool->jobs_mutex), NULL);
+    pthread_mutex_init(&mutex, NULL);
     pthread_cond_init(&(threadpool->jobs_cond), NULL);
+
 
     for (int i=0; i<numThreads; i++) {
         pthread_create(&(threadpool->threads[i]), NULL, do_work, (void*)threadpool);
     }
+    threadpool->jobs = NULL;
+
     return threadpool;
+}
+
+int threadpool_free(threadpool_t *pool) {
+    if (pool == NULL) {
+        return 0;
+    }
+
+    if(pool->threads) {
+        free(pool->threads);
+        pthread_mutex_lock(&(pool->jobs_mutex));
+        pthread_mutex_destroy(&(pool->jobs_mutex));
+        pthread_cond_destroy(&(pool->jobs_cond));
+    }
+    free(pool);
+    return 1;
 }
 
 int main(int argc, char **argv)
@@ -274,7 +320,8 @@ int main(int argc, char **argv)
         exit(0);
     }
 
-    threadpool_t *threadpool;
+    printf("%d\n", numThreads);
+    struct threadpool_t *threadpool;
     threadpool = threadpool_create(numThreads);
 
     int listenFd = open_listenfd(port);
@@ -300,14 +347,13 @@ int main(int argc, char **argv)
         else
             printf("Connection from ?UNKNOWN?\n");
 
-        struct survival_bag context;
-
-        context.connFd = connFd;
-        strcpy(context.rootFolder, root);
-        // threadpool->add_job(context);
+        threadpool_add(threadpool, connFd);
+        printf("add job %d\n", connFd);
         // threadpool->add_job(connFd);
-        serve_http(connFd, root, threadpool);
-        close(connFd);
+        // serve_http(connFd, root, threadpool);
+        // close(connFd);
     }
+
+    threadpool_free(threadpool);
     return 0;
 }
