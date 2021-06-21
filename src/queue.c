@@ -73,7 +73,6 @@ int isEmpty(Queue *q) {
 void deleteQueue(Queue *q) {
     while(q->head!=NULL) {
         Node *cur = q->head;
-        int p = cur->data;
         q->head = q->head->next;
         free(cur);
     }

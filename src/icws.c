@@ -191,7 +191,6 @@ void serve_http(int connFd, char *rootFolder)
     }
 
     pthread_mutex_lock(&mutex);
-    printf("parsing...\n");
     Request *request = parse(buf, readRet, connFd);
     pthread_mutex_unlock(&mutex);
 
@@ -200,6 +199,9 @@ void serve_http(int connFd, char *rootFolder)
         char path[MAXBUF];
         strcpy(path, rootFolder);
         strcat(path, request->http_uri);
+        if(strcmp(path, "/") == 0) {
+            strcpy(path, "/index.html");
+        }
 
         /* 505 HTTP Version Not Supported */
         if (strcasecmp(request->http_version, "HTTP/1.1"))
@@ -251,14 +253,10 @@ void* do_work(void *arg) {
         printf("%d\n", connFd);
         serve_http(connFd, root);
         close(connFd);
-
         /* Option 5: Go to sleep until it's been notified of changes in the
          * work_queue. Use semaphores or conditional variables
          */
     }
-
-    pthread_mutex_unlock(&(pool->jobs_mutex));
-    pthread_exit(NULL);
     return NULL;
 }
 

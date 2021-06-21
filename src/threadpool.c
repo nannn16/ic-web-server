@@ -15,10 +15,10 @@ struct threadpool_t *threadpool_create(int numThreads) {
     struct threadpool_t *threadpool = (struct threadpool_t*) malloc(sizeof(struct threadpool_t));
 
     threadpool->threads = (pthread_t *)malloc(sizeof(pthread_t) * numThreads);
+    threadpool->jobs = (Queue*) malloc(sizeof(Queue));
 
     pthread_mutex_init(&(threadpool->jobs_mutex), NULL);
     pthread_cond_init(&(threadpool->jobs_cond), NULL);
-
 
     for (int i=0; i<numThreads; i++) {
         pthread_create(&(threadpool->threads[i]), NULL, do_work, (void*)threadpool);
