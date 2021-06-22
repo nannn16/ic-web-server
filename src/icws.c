@@ -212,51 +212,55 @@ int serve_http(int connFd, char *rootFolder)
         }
         strcat(buf, buffer);
         /* if there is CRLFCRLF state, then we parse */
-        if (strstr(buf, "\r\n\r\n") != NULL) break;
-    }
+        if (strstr(buf, "\r\n\r\n") != NULL) {
+            pthread_mutex_lock(&mutex);
+            Request *request = parse(buf, readRet, connFd);
+	    memset(buf, 0, sizeof(buf));
+	    readRet = 0;
+            pthread_mutex_unlock(&mutex);
 
-    pthread_mutex_lock(&mutex);
-    Request *request = parse(buf, readRet, connFd);
-    pthread_mutex_unlock(&mutex);
+            int connection = 0;
+            if (request != NULL)
+            {
+                connection = find_connection(request);
+                char path[MAXBUF];
+                strcpy(path, rootFolder);
+                strcat(path, request->http_uri);
+                if(strcmp(request->http_uri, "/") == 0) {
+                    strcat(path, "index.html");
+                }
 
-    if (request != NULL)
-    {
-        int connection = find_connection(request);
-        char path[MAXBUF];
-        strcpy(path, rootFolder);
-        strcat(path, request->http_uri);
-        if(strcmp(request->http_uri, "/") == 0) {
-            strcat(path, "index.html");
+                printf("LOG: %s %s connFd: %d Connection: %d\n", request->http_method, path, connFd, connection);
+                /* 505 HTTP Version Not Supported */
+                if (strcasecmp(request->http_version, "HTTP/1.1"))
+                {
+                    respond_header(connFd, path, 505, connection);
+                }
+                else if (strcasecmp(request->http_method, "GET") == 0)
+                {
+                    respond_server(connFd, path, 200, connection);
+                }
+                else if (strcasecmp(request->http_method, "HEAD") == 0)
+                {
+                    respond_header(connFd, path, 200, connection);
+                }
+                else
+                {
+                    respond_header(connFd, NULL, 501, connection);
+                }
+                free(request->headers);
+                free(request);
+            }
+            /* Malformed Requests */
+            else
+            {
+                respond_header(connFd, NULL, 400, 0);
+            }
+	    memset(buf, 0, sizeof(buf));
+            if (connection == 0) break;
         }
-
-        printf("LOG: %s %s connFd: %d Connection: %d\n", request->http_method, path, connFd, connection);
-        /* 505 HTTP Version Not Supported */
-        if (strcasecmp(request->http_version, "HTTP/1.1"))
-        {
-            respond_header(connFd, path, 505, connection);
-        }
-        else if (strcasecmp(request->http_method, "GET") == 0)
-        {
-            respond_server(connFd, path, 200, connection);
-        }
-        else if (strcasecmp(request->http_method, "HEAD") == 0)
-        {
-            respond_header(connFd, path, 200, connection);
-        }
-        else
-        {
-            respond_header(connFd, NULL, 501, connection);
-        }
-        free(request->headers);
-        free(request);
-        return connection;
+	memset(buffer, 0, sizeof(buffer));
     }
-    /* Malformed Requests */
-    else
-    {
-        respond_header(connFd, NULL, 400, 0);
-    }
-    return 0;
 }
 
 void* do_work(void *arg) {
@@ -270,13 +274,8 @@ void* do_work(void *arg) {
 
         int connFd = pop(pool->jobs);
         pthread_mutex_unlock(&(pool->jobs_mutex));
-        int connection = serve_http(connFd, root);
-        if (connection == 0) {
-            close(connFd);
-        }
-        else {
-            threadpool_add(pool, connFd);
-        }
+        serve_http(connFd, root);
+        close(connFd);
         /* Option 5: Go to sleep until it's been notified of changes in the
          * work_queue. Use semaphores or conditional variables
          */
