@@ -8,4 +8,4 @@ struct threadpool_t {
 void* do_work(void *arg);
 void threadpool_add(struct threadpool_t *pool, int connFd);
 struct threadpool_t *threadpool_create(int numThreads);
-int threadpool_free(struct threadpool_t *pool);
+int threadpool_free(struct threadpool_t *pool, int numThreads);

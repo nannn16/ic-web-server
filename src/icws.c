@@ -16,7 +16,10 @@
 #include "queue.h"
 #include "threadpool.h"
 
-// https://github.com/mbrossard/threadpool/blob/master/src/threadpool.c
+/* 
+Reference:
+https://github.com/mbrossard/threadpool/blob/master/src/threadpool.c
+*/
 
 #define MAXBUF 8192
 
@@ -105,7 +108,7 @@ char const *getMIMEType(char *ext)
     return type;
 }
 
-int respond_header(int connFd, char *path, int code)
+int respond_header(int connFd, char *path, int code, int connection)
 {
     char buf[MAXBUF];
     struct stat s;
@@ -133,25 +136,32 @@ int respond_header(int connFd, char *path, int code)
             code = 404;
         }
     }
+    char const *connect = "";
+    if (connection == 0) {
+        connect = "close";
+    }
+    else {
+        connect = "keep-alive";
+    }
 
     char const *msg = getStatusCode(code);
     sprintf(buf,
             "HTTP/1.1 %s\r\n"
             "Date: %s\r\n"
             "Server: Tiny\r\n"
-            "Connection: close\r\n"
+            "Connection: %s\r\n"
             "Content-length: %ld\r\n"
             "Content-type: %s\r\n"
             "Last-Modified: %s\r\n\r\n",
-            msg, time, size, type, mtime);
+            msg, time, connect, size, type, mtime);
     write_all(connFd, buf, strlen(buf));
     return 1;
 }
 
-void respond_server(int connFd, char *path, int code)
+void respond_server(int connFd, char *path, int code, int connection)
 {
 
-    respond_header(connFd, path, code);
+    respond_header(connFd, path, code, connection);
     char buf[MAXBUF];
     int inputFd = open(path, O_RDONLY);
     if (inputFd <= 0)
@@ -168,11 +178,26 @@ void respond_server(int connFd, char *path, int code)
     close(inputFd);
 }
 
-void serve_http(int connFd, char *rootFolder)
+/* find whether request connection is close or keep-alive */
+int find_connection(Request *request) {
+
+    for(int i=0; i<request->header_count; i++) {
+        if(strcasecmp(request->headers[i].header_name, "connection") == 0) {
+            if (strcasecmp(request->headers[i].header_value, "keep-alive") == 0) {
+                return 1;
+            }
+            else {
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+int serve_http(int connFd, char *rootFolder)
 {
-    char buf[MAXBUF];
+    char buf[MAXBUF]; char buffer[MAXBUF];
     memset(buf, 0, sizeof(buf));
-    char buffer[MAXBUF];
     ssize_t readRet = 0;
     ssize_t numRead;
     /* Drain the remaining of the request */
@@ -182,8 +207,8 @@ void serve_http(int connFd, char *rootFolder)
         if (readRet > MAXBUF)
         {
             printf("Request header too large\n");
-            respond_header(connFd, NULL, 400);
-            return ;
+            respond_header(connFd, NULL, 400, 0);
+            return 0;
         }
         strcat(buf, buffer);
         /* if there is CRLFCRLF state, then we parse */
@@ -196,53 +221,48 @@ void serve_http(int connFd, char *rootFolder)
 
     if (request != NULL)
     {
+        int connection = find_connection(request);
         char path[MAXBUF];
         strcpy(path, rootFolder);
         strcat(path, request->http_uri);
-        if(strcmp(path, "/") == 0) {
-            strcpy(path, "/index.html");
+        if(strcmp(request->http_uri, "/") == 0) {
+            strcat(path, "index.html");
         }
 
+        printf("LOG: %s %s connFd: %d Connection: %d\n", request->http_method, path, connFd, connection);
         /* 505 HTTP Version Not Supported */
         if (strcasecmp(request->http_version, "HTTP/1.1"))
         {
-            respond_header(connFd, path, 505);
+            respond_header(connFd, path, 505, connection);
         }
         else if (strcasecmp(request->http_method, "GET") == 0)
         {
-            printf("LOG: Sending %s\n", path);
-            respond_server(connFd, path, 200);
+            respond_server(connFd, path, 200, connection);
         }
         else if (strcasecmp(request->http_method, "HEAD") == 0)
         {
-            respond_header(connFd, path, 200);
+            respond_header(connFd, path, 200, connection);
         }
         else
         {
-            respond_header(connFd, NULL, 501);
+            respond_header(connFd, NULL, 501, connection);
         }
         free(request->headers);
         free(request);
+        return connection;
     }
     /* Malformed Requests */
     else
     {
-        respond_header(connFd, NULL, 400);
+        respond_header(connFd, NULL, 400, 0);
     }
-    return ;
+    return 0;
 }
 
 void* do_work(void *arg) {
 
     struct threadpool_t *pool = (struct threadpool_t *) arg;
     for (;;) {
-        // if (tpool->remove_job(&context)) {
-
-        //     // if (connFd < 0) break; // Terminate with a number < 0
-        //     printf("%d\n", context.connFd);
-        //     serve_http(context.connFd, context.rootFolder);
-        //     close(context.connFd);
-        // }
         pthread_mutex_lock(&(pool->jobs_mutex));
         while(isEmpty(pool->jobs)) {
             pthread_cond_wait(&(pool->jobs_cond), &(pool->jobs_mutex));
@@ -250,9 +270,13 @@ void* do_work(void *arg) {
 
         int connFd = pop(pool->jobs);
         pthread_mutex_unlock(&(pool->jobs_mutex));
-        printf("%d\n", connFd);
-        serve_http(connFd, root);
-        close(connFd);
+        int connection = serve_http(connFd, root);
+        if (connection == 0) {
+            close(connFd);
+        }
+        else {
+            threadpool_add(pool, connFd);
+        }
         /* Option 5: Go to sleep until it's been notified of changes in the
          * work_queue. Use semaphores or conditional variables
          */
@@ -262,6 +286,7 @@ void* do_work(void *arg) {
 
 int main(int argc, char **argv)
 {
+    struct pollfd *pfds;
     getOption(argc, argv);
     if (strlen(port) == 0 || strlen(root) == 0 || numThreads <= 0)
     {
@@ -279,6 +304,7 @@ int main(int argc, char **argv)
     pthread_mutex_init(&mutex, NULL);
 
     int listenFd = open_listenfd(port);
+
     for (;;)
     {
         struct sockaddr_storage clientAddr;
@@ -302,6 +328,6 @@ int main(int argc, char **argv)
         threadpool_add(threadpool, connFd);
     }
 
-    threadpool_free(threadpool);
+    threadpool_free(threadpool, numThreads);
     return 0;
 }
