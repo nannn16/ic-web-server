@@ -84,6 +84,8 @@ char const *getStatusCode(int code)
         msg = "501 Method Unimplemented";
     else if (code == 505)
         msg = "505 HTTP Version Not Supported";
+    else if (code == 408)
+        msg = "408 Request Timeout";
     return msg;
 }
 
@@ -121,7 +123,7 @@ int respond_header(int connFd, char *path, int code, int connection)
     char const *type = "";
     char mtime[64] = "";
 
-    if (code != 400 && code != 501)
+    if (code != 400 && code != 501 && code != 408)
     {
         if (stat(path, &s) >= 0)
         {
@@ -178,9 +180,11 @@ void respond_server(int connFd, char *path, int code, int connection)
     close(inputFd);
 }
 
-/* find whether request connection is close or keep-alive */
+/* 
+find whether request connection is close or keep-alive 
+if keep-alive return 1, else return 0
+*/
 int find_connection(Request *request) {
-
     for(int i=0; i<request->header_count; i++) {
         if(strcasecmp(request->headers[i].header_name, "connection") == 0) {
             if (strcasecmp(request->headers[i].header_value, "keep-alive") == 0) {
@@ -194,72 +198,83 @@ int find_connection(Request *request) {
     return 0;
 }
 
-int serve_http(int connFd, char *rootFolder)
+void serve_http(int connFd, char *rootFolder)
 {
     char buf[MAXBUF]; char buffer[MAXBUF];
     memset(buf, 0, sizeof(buf));
+    memset(buffer, 0, sizeof(buffer));
     ssize_t readRet = 0;
     ssize_t numRead;
     /* Drain the remaining of the request */
-    while ((numRead = read(connFd, buffer, MAXBUF)) > 0)
-    {
-        readRet += numRead;
-        if (readRet > MAXBUF)
-        {
-            printf("Request header too large\n");
-            respond_header(connFd, NULL, 400, 0);
-            return 0;
+    struct pollfd pfds[1];
+
+    while(1) {
+        pfds[0].fd = connFd;
+        pfds[0].events = POLLIN;
+        int j = poll(pfds, 1, timeout*1000);
+        if (j == 0) {
+            respond_header(connFd, NULL, 408, 0);
+            break;
         }
-        strcat(buf, buffer);
-        /* if there is CRLFCRLF state, then we parse */
-        if (strstr(buf, "\r\n\r\n") != NULL) {
-            pthread_mutex_lock(&mutex);
-            Request *request = parse(buf, readRet, connFd);
-	    memset(buf, 0, sizeof(buf));
-	    readRet = 0;
-            pthread_mutex_unlock(&mutex);
-
-            int connection = 0;
-            if (request != NULL)
+        if ((numRead = read(connFd, buffer, MAXBUF)) > 0)
+        {
+            readRet += numRead;
+            if (readRet > MAXBUF)
             {
-                connection = find_connection(request);
-                char path[MAXBUF];
-                strcpy(path, rootFolder);
-                strcat(path, request->http_uri);
-                if(strcmp(request->http_uri, "/") == 0) {
-                    strcat(path, "index.html");
-                }
+                printf("Request header too large\n");
+                respond_header(connFd, NULL, 400, 0);
+                break;
+            }
+            strcat(buf, buffer);
+            /* if there is CRLFCRLF state, then we parse */
+            if (strstr(buf, "\r\n\r\n") != NULL) {
+                pthread_mutex_lock(&mutex);
+                Request *request = parse(buf, readRet, connFd);
+                pthread_mutex_unlock(&mutex);
 
-                printf("LOG: %s %s connFd: %d Connection: %d\n", request->http_method, path, connFd, connection);
-                /* 505 HTTP Version Not Supported */
-                if (strcasecmp(request->http_version, "HTTP/1.1"))
+                int connection = 0;
+                if (request != NULL)
                 {
-                    respond_header(connFd, path, 505, connection);
+                    connection = find_connection(request);
+                    char path[MAXBUF];
+                    strcpy(path, rootFolder);
+                    strcat(path, request->http_uri);
+                    if(strcmp(request->http_uri, "/") == 0) {
+                        strcat(path, "index.html");
+                    }
+
+                    printf("LOG: %s %s connFd: %d Connection: %d\n", request->http_method, path, connFd, connection);
+                    /* 505 HTTP Version Not Supported */
+                    if (strcasecmp(request->http_version, "HTTP/1.0"))
+                    {
+                        respond_header(connFd, path, 505, connection);
+                    }
+                    else if (strcasecmp(request->http_method, "GET") == 0)
+                    {
+                        respond_server(connFd, path, 200, connection);
+                    }
+                    else if (strcasecmp(request->http_method, "HEAD") == 0)
+                    {
+                        respond_header(connFd, path, 200, connection);
+                    }
+                    else
+                    {
+                        respond_header(connFd, NULL, 501, connection);
+                    }
+                    free(request->headers);
+                    free(request);
                 }
-                else if (strcasecmp(request->http_method, "GET") == 0)
-                {
-                    respond_server(connFd, path, 200, connection);
-                }
-                else if (strcasecmp(request->http_method, "HEAD") == 0)
-                {
-                    respond_header(connFd, path, 200, connection);
-                }
+                /* Malformed Requests */
                 else
                 {
-                    respond_header(connFd, NULL, 501, connection);
+                    respond_header(connFd, NULL, 400, 0);
                 }
-                free(request->headers);
-                free(request);
+                memset(buf, 0, sizeof(buf));
+                readRet = 0;
+                if (connection == 0) break;
             }
-            /* Malformed Requests */
-            else
-            {
-                respond_header(connFd, NULL, 400, 0);
-            }
-	    memset(buf, 0, sizeof(buf));
-            if (connection == 0) break;
+            memset(buffer, 0, sizeof(buffer));
         }
-	memset(buffer, 0, sizeof(buffer));
     }
 }
 
@@ -268,11 +283,11 @@ void* do_work(void *arg) {
     struct threadpool_t *pool = (struct threadpool_t *) arg;
     for (;;) {
         pthread_mutex_lock(&(pool->jobs_mutex));
-        while(isEmpty(pool->jobs)) {
+        while(isEmpty(&(pool->jobs))) {
             pthread_cond_wait(&(pool->jobs_cond), &(pool->jobs_mutex));
         }
 
-        int connFd = pop(pool->jobs);
+        int connFd = pop(&(pool->jobs));
         pthread_mutex_unlock(&(pool->jobs_mutex));
         serve_http(connFd, root);
         close(connFd);
@@ -285,21 +300,17 @@ void* do_work(void *arg) {
 
 int main(int argc, char **argv)
 {
-    struct pollfd *pfds;
     getOption(argc, argv);
     if (strlen(port) == 0 || strlen(root) == 0 || numThreads <= 0)
     {
         printf("Required option --port, --root and -- numThreads\n");
         exit(0);
     }
-    printf("%d\n", numThreads);
+    printf("%d %d\n", numThreads, timeout);
     
-    struct threadpool_t *threadpool;
-    threadpool = threadpool_create(numThreads);
-    if(threadpool == NULL) {
-        printf("error: empty thread pool\n");
-        exit(0);
-    }
+    struct threadpool_t threadpool;
+    threadpool_create(&threadpool, numThreads);
+
     pthread_mutex_init(&mutex, NULL);
 
     int listenFd = open_listenfd(port);
@@ -324,9 +335,8 @@ int main(int argc, char **argv)
         else
             printf("Connection from ?UNKNOWN?\n");
 
-        threadpool_add(threadpool, connFd);
+        threadpool_add(&threadpool, connFd);
     }
 
-    threadpool_free(threadpool, numThreads);
     return 0;
 }

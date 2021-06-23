@@ -7,76 +7,34 @@
 #include <assert.h>
 #include "queue.h"
 
-void push(Queue **q, int connFd) {
-    if(*q == NULL) {
-        *q = (Queue*) malloc(sizeof(Queue));
-        (*q)->head = NULL;
-        (*q)->tail = NULL;
-    }
+void queue_init(Queue *q, int size) {
+    q->size = size;
+    q->head = 0;
+    q->tail = 0;
+    q->count = 0;
+}
 
-    Node *newNode = (Node*) malloc(sizeof(Node));
-    newNode->data = connFd;
-    newNode->next = NULL;
-
-    if((*q)->head == NULL) {
-        (*q)->head = newNode;
-        (*q)->tail = newNode;
-    }
-
-    else {
-        (*q)->tail->next = newNode;
-        (*q)->tail = (*q)->tail->next;
-    }
-    // IMPLEMENT
+void push(Queue *q, int connFd) {
+    q->data[q->tail] = connFd;
+    q->tail = (q->tail + 1) % q->size;
+    q->count = q->count + 1;
 }
 
 int pop(Queue *q) {
     if(isEmpty(q)) {
         return -1;
     }
-    int p = q->head->data;
-    Node *temp = q->head;
-    q->head = q->head->next;
-    if(q->head==NULL) {
-        q->tail = NULL;
-    }
-    free(temp);
+    int p = q->data[q->head];
+    q->head = (q->head + 1) % q->size;
+    q->count = q->count - 1;
     return p;
-    // IMPLEMENT
-}
-
-void print(Queue *q) {
-    if(isEmpty(q)) {
-        printf("No items\n");
-    }
-    else {
-        Node *cur = q->head;
-        while(cur!=NULL) {
-            printf("%d\n", cur->data);
-            cur = cur->next;
-        }
-    }
-    // IMPLEMENT
 }
 
 int isEmpty(Queue *q) {
-    if(q==NULL) {
-        return 1;
-    }
-    if(q->head == NULL) {
+    if(q->count<=0) {
         return 1;
     }
     return 0;
-    // IMPLEMENT
-}
-
-void deleteQueue(Queue *q) {
-    while(q->head!=NULL) {
-        Node *cur = q->head;
-        q->head = q->head->next;
-        free(cur);
-    }
-    q->tail = NULL;
     // IMPLEMENT
 }
 
