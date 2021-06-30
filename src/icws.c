@@ -293,6 +293,9 @@ void setEnv(Request *request) {
     if(query_string) {
         setenv("QUERY_STRING", query_string+1, 1);
     }
+    else {
+        setenv("QUERY_STRING", "", 1);
+    }
     setenv("REMOTE_ADDR", ipBuf, 1);
     setenv("REQUEST_METHOD", request->http_method, 1);
     setenv("REQUEST_URI", request->http_uri, 1);
@@ -370,9 +373,7 @@ void cgi_process(Request *request, int connFd, int length, int method, char *pos
                 ssize_t readRet = read(connFd, buffer, toRead);
                 toRead -= readRet;
                 write_all(p2cFds[1], buffer, readRet);
-                memset(buffer, 0, sizeof(buffer));
             }
-            printf("finish writing\n");
         }
 
         /* Close this end, done writing. */
@@ -597,6 +598,7 @@ int main(int argc, char **argv)
         struct sockaddr_in *sin = (struct sockaddr_in *)&clientAddr;
         unsigned char *ip = (unsigned char *)&sin->sin_addr.s_addr;
         char buf[MAXBUF];
+        memset(ipBuf, 0, sizeof(ipBuf));
         for(int i=0; i<4; i++) {
             sprintf(buf, "%d", ip[i]);
             strcat(ipBuf, buf);
