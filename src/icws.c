@@ -34,7 +34,7 @@ char root[MAXBUF];
 int numThreads;
 int timeout;
 char cgiHandler[MAXBUF];
-char svcBuf[MAXBUF];
+char ipBuf[MAXBUF];
 pthread_mutex_t mutex;
 typedef struct sockaddr SA;
 struct threadpool_t *threadpool;
@@ -271,7 +271,8 @@ void setEnv(Request *request) {
     char *query_string = strchr(request->http_uri, '?');
     char path[MAXBUF];
     strcpy(path, request->http_uri);
-    char *path_info = strtok(path, "?");
+    char *context = NULL;
+    char *path_info = strtok_r(path, "?", &context); // strtok_r
 
     char http_accept[MAXBUF];
     char referer[MAXBUF];
@@ -292,10 +293,10 @@ void setEnv(Request *request) {
     if(query_string) {
         setenv("QUERY_STRING", query_string+1, 1);
     }
-    setenv("REMOTE_ADDR", svcBuf, 1);
+    setenv("REMOTE_ADDR", ipBuf, 1);
     setenv("REQUEST_METHOD", request->http_method, 1);
     setenv("REQUEST_URI", request->http_uri, 1);
-    setenv("SCRIPT_NAME", cgiHandler, 1);
+    setenv("SCRIPT_NAME", path_info, 1);
     setenv("SERVER_PORT", port, 1);
     setenv("SERVER_PROTOCOL", "HTTP/1.1", 1);
     setenv("SERVER_SOFTWARE", "Tiny", 1);
@@ -586,12 +587,23 @@ int main(int argc, char **argv)
             continue;
         }
 
-        char hostBuf[MAXBUF];
+        char hostBuf[MAXBUF], svcBuf[MAXBUF];
         if (getnameinfo((SA *)&clientAddr, clientLen,
                         hostBuf, MAXBUF, svcBuf, MAXBUF, 0) == 0)
             printf("Connection from %s:%s\n", hostBuf, svcBuf);
         else
             printf("Connection from ?UNKNOWN?\n");
+        
+        struct sockaddr_in *sin = (struct sockaddr_in *)&clientAddr;
+        unsigned char *ip = (unsigned char *)&sin->sin_addr.s_addr;
+        char buf[MAXBUF];
+        for(int i=0; i<4; i++) {
+            sprintf(buf, "%d", ip[i]);
+            strcat(ipBuf, buf);
+            if(i<3) {
+                strcat(ipBuf, ".");
+            }
+        }
 
         threadpool_add(threadpool, connFd);
     }
