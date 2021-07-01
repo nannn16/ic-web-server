@@ -365,7 +365,7 @@ void cgi_process(Request *request, int connFd, int length, int method, char *pos
             size_t len = 0;
             if(post_data != NULL) {
                 len = strlen(post_data);
-                write_all(p2cFds[1], post_data, sizeof(post_data));
+                write_all(p2cFds[1], post_data, len);
             }
             char buffer[MAXBUF];
             ssize_t toRead = length - len;
